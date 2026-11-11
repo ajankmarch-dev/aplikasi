@@ -1564,6 +1564,7 @@ PAGES.toko = (el, params, fresh) => {
     el.innerHTML = pageHead('<i class="bi bi-database"></i> Database master toko mitra', 'Data Toko Mitra',
       'Kelola direktori toko mitra teknik & furniture offline, ketentuan pembayaran (TOP), dan pin koordinat peta.',
       `<button class="btn btn-outline" onclick="exportToko()"><i class="bi bi-download"></i> Ekspor CSV</button>
+       <button class="btn btn-outline" onclick="openImportToko()"><i class="bi bi-upload"></i> Impor Data Toko</button>
        <button class="btn btn-primary" onclick="openTokoForm()"><i class="bi bi-plus-circle"></i> Tambah Toko Baru</button>`) + `
     <div class="row g-3 mb-4" id="tkKpi"></div>
     <div class="card-x">
@@ -1992,7 +1993,10 @@ PAGES.notifikasi = (el, params, fresh) => {
         <button class="btn btn-outline w-100 mb-3" onclick="reinstallTriggers(this)"><i class="bi bi-arrow-repeat"></i> Pasang Ulang Pemicu</button>
         <div class="kpi-label mb-1">Backup database (mingguan, Minggu 23:00)</div>
         <div class="small text-2 mb-2">${tr.backup ? pill('Terjadwal', 'ok', 1) : pill('Belum terjadwal', 'warn')} Terakhir: <span id="lastBackup">${esc(st.lastBackup || 'belum ada')}</span></div>
-        <button class="btn btn-outline w-100" onclick="runBackup(this)"><i class="bi bi-cloud-arrow-down"></i> Backup Sekarang</button>
+        <button class="btn btn-outline w-100 mb-3" onclick="runBackup(this)"><i class="bi bi-cloud-arrow-down"></i> Backup Sekarang</button>
+        <div class="kpi-label mb-1">Sinkron edit manual spreadsheet</div>
+        <div class="small text-2 mb-2">${tr.sheetSync ? pill('Otomatis aktif', 'ok', 1) : pill('Belum aktif — klik Pasang Ulang Pemicu', 'warn')}</div>
+        <button class="btn btn-outline w-100" onclick="clearServerCache(this)"><i class="bi bi-arrow-clockwise"></i> Segarkan Cache Server</button>
       </div>
       <div class="callout"><i class="bi bi-code-slash"></i><div class="small">Fungsi <code>sendDailyArOverdueSummary()</code> membaca sheet Piutang, menyegarkan status secara batch, menyaring sisa &gt; 0 yang jatuh tempo, lalu mengirim 1 email via MailApp.</div></div>
     </div>
@@ -2031,4 +2035,195 @@ async function runBackup(btn) {
   const done = busy(btn, 'Mencadangkan…');
   try { const t = await api('runBackupNow'); S.settings.lastBackup = t; $('#lastBackup').textContent = t; toast('Backup spreadsheet berhasil dibuat di folder Backup.', 'ok'); }
   catch (e) { e.type !== 'auth' && toast(e.message, 'bad', 'Backup gagal'); } finally { done(); }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// BAGIAN 8 — IMPOR DATA TOKO (Excel / Google Sheets / CSV)
+// ════════════════════════════════════════════════════════════
+const IMP_FIELDS = [
+  ['nama', 'Nama Toko', true, ['namatoko', 'nama', 'toko', 'namacustomer', 'customer', 'pelanggan', 'namapelanggan', 'outlet', 'namaoutlet', 'namamitra']],
+  ['kota', 'Kota / Daerah', true, ['kotadaerah', 'kota', 'kabupaten', 'kotakabupaten', 'kabkota', 'daerah', 'city', 'kab', 'wilayah']],
+  ['provinsi', 'Provinsi', false, ['provinsi', 'prov', 'propinsi', 'province']],
+  ['alamat', 'Alamat', false, ['alamat', 'alamatlengkap', 'alamattoko', 'address']],
+  ['top', 'Term of Payment', false, ['termofpayment', 'top', 'termin', 'tempo', 'termpembayaran', 'syaratbayar', 'jangkawaktu', 'tenor']],
+  ['pic', 'Nama PIC', false, ['namapictoko', 'pic', 'namapic', 'pemilik', 'owner', 'kontakperson', 'cp', 'namapemilik', 'contactperson']],
+  ['kontak', 'Nomor Kontak / WA', false, ['nomorkontak', 'kontak', 'nohp', 'hp', 'telepon', 'telp', 'wa', 'whatsapp', 'notelp', 'nomorhp', 'nowa', 'phone', 'notlp', 'nomortelepon']],
+  ['lat', 'Latitude', false, ['latitude', 'lat', 'garislintang', 'lintang']],
+  ['lng', 'Longitude', false, ['longitude', 'lng', 'long', 'lon', 'garisbujur', 'bujur']],
+  ['koordinat', 'Koordinat (lat, lng) / Link Maps', false, ['koordinat', 'koordinatpinmap', 'pinmap', 'titikkoordinat', 'lokasi', 'gps', 'maps', 'googlemaps', 'linkmaps', 'linklokasi', 'sharelok']],
+  ['salesman', 'Salesman PJ (nama/ID/email)', false, ['salesman', 'sales', 'idsalesman', 'salesmanpj', 'idsalesmanpj', 'namasales', 'namasalesman', 'pjsales']],
+  ['kategori', 'Kategori Pelanggan', false, ['kategoripelanggan', 'kategori', 'jenis', 'tipe', 'segmen', 'jenistoko']],
+  ['jam', 'Jam Operasional', false, ['jamoperasional', 'jam', 'jambuka']],
+  ['status', 'Status', false, ['status', 'statusaktif', 'statustoko']],
+  ['id', 'ID Toko (opsional, untuk memperbarui)', false, ['idtoko', 'kodetoko', 'id', 'kode', 'idcustomer', 'kodecustomer', 'kodepelanggan']]
+];
+const IMP = { header: [], rows: [], map: {}, mode: 'update', result: null };
+const normHead = h => String(h || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/** Parser CSV/TSV sederhana yang memahami tanda kutip. */
+function parseDelimited(text) {
+  text = String(text || '').replace(/^﻿/, '').replace(/\r\n?/g, '\n').replace(/\n+$/, '');
+  if (!text.trim()) return [];
+  const first = text.split('\n')[0];
+  const cnt = c => first.split(c).length - 1;
+  const delim = [['\t', cnt('\t')], [';', cnt(';')], [',', cnt(',')]].sort((a, b) => b[1] - a[1])[0][0];
+  const out = []; let row = [], cell = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch; }
+    else if (ch === '"' && cell === '') q = true;
+    else if (ch === delim) { row.push(cell); cell = ''; }
+    else if (ch === '\n') { row.push(cell); out.push(row); row = []; cell = ''; }
+    else cell += ch;
+  }
+  row.push(cell); out.push(row);
+  return out;
+}
+function autoMap(header) {
+  const map = {}, used = new Set(), H = header.map(normHead);
+  IMP_FIELDS.forEach(([k, , , syn]) => {
+    let idx = -1;
+    for (const sy of syn) { idx = H.findIndex((h, i) => !used.has(i) && h === sy); if (idx >= 0) break; }
+    if (idx < 0) for (const sy of syn) { idx = H.findIndex((h, i) => !used.has(i) && sy.length > 3 && h.includes(sy)); if (idx >= 0) break; }
+    if (idx >= 0) { map[k] = idx; used.add(idx); }
+  });
+  return map;
+}
+function downloadTokoTemplate() {
+  downloadCsv('template-impor-toko.csv', [
+    ['ID Toko', 'Nama Toko', 'Alamat', 'Kota/Daerah', 'Provinsi', 'Latitude', 'Longitude', 'Term of Payment', 'Nama PIC Toko', 'Nomor Kontak', 'Kategori Pelanggan', 'Salesman PJ', 'Jam Operasional', 'Status'],
+    ['', 'TB Contoh Jaya', 'Jl. Raya Contoh No. 1', 'Bandung', 'Jawa Barat', '-6.917464', '107.619122', '30', 'Pak Budi', '081234567890', 'Toko Part Teknik & Retail', 'Budi Santoso', 'Senin - Sabtu 08:00 - 17:00', 'Aktif']
+  ]);
+}
+
+function openImportToko() {
+  Object.assign(IMP, { header: [], rows: [], map: {}, mode: 'update', result: null });
+  openModal({
+    title: 'Impor Data Toko', sub: 'Langkah 1 dari 3 • Sumber data', size: 'modal-xl',
+    body: `<div class="callout mb-3"><i class="bi bi-info-circle"></i><div class="small">Bisa dari <b>Excel</b>, <b>Google Sheets</b>, atau file <b>CSV</b>. Baris pertama harus berisi judul kolom.
+      Minimal ada kolom <b>Nama Toko</b> dan <b>Kota</b>. Kolom lain bebas urutan dan namanya, karena akan dicocokkan di langkah berikutnya.
+      <a href="javascript:void(0)" onclick="downloadTokoTemplate()">Unduh template</a></div></div>
+      <div class="row g-3">
+        <div class="col-lg-7"><label class="form-label">Tempel data (blok sel di Excel/Sheets termasuk judul kolom → Ctrl+C → Ctrl+V di sini)</label>
+          <textarea class="form-control num" id="impPaste" rows="10" placeholder="Nama Toko&#9;Kota&#9;Provinsi&#9;TOP&#9;No HP&#10;TB Maju Lancar&#9;Bandung Barat&#9;Jawa Barat&#9;30 hari&#9;0812…" style="font-size:12px;white-space:pre"></textarea></div>
+        <div class="col-lg-5"><label class="form-label">…atau unggah file</label>
+          <label class="photo-slot w-100" style="aspect-ratio:auto;height:206px" for="impFile"><i class="bi bi-file-earmark-spreadsheet"></i>
+            <span class="fw-semibold" style="color:var(--text)">Pilih file .xlsx, .xls, atau .csv</span><span id="impFileName">Maks. 5.000 baris</span></label>
+          <input type="file" id="impFile" class="d-none" accept=".xlsx,.xls,.csv,.txt,text/csv"></div>
+      </div><div id="impErr" class="invalid-msg mt-2"></div>`,
+    footer: `<button class="btn btn-outline" data-bs-dismiss="modal">Batal</button><button class="btn btn-primary" id="impNext1">Lanjut <i class="bi bi-arrow-right"></i></button>`
+  });
+  $('#impFile').addEventListener('change', impReadFile);
+  $('#impNext1').onclick = () => {
+    const txt = $('#impPaste').value;
+    if (!IMP.rows.length && !txt.trim()) return ($('#impErr').textContent = 'Tempel data atau pilih file terlebih dahulu.');
+    if (txt.trim()) impLoadTable(parseDelimited(txt));
+    if (IMP.rows.length) impStepMap();
+  };
+}
+async function impReadFile(e) {
+  const f = e.target.files[0]; if (!f) return;
+  $('#impFileName').textContent = 'Membaca ' + f.name + '…';
+  try {
+    let table;
+    if (/\.(xlsx|xls)$/i.test(f.name)) {
+      await loadScript('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
+      const wb = XLSX.read(await f.arrayBuffer(), { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames.find(n => /toko|customer|pelanggan|outlet/i.test(n)) || wb.SheetNames[0]];
+      table = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+    } else {
+      table = parseDelimited(await f.text());
+    }
+    impLoadTable(table);
+    $('#impFileName').textContent = `${f.name} • ${IMP.rows.length} baris data`;
+    $('#impPaste').value = '';
+    if (IMP.rows.length) impStepMap();
+  } catch (err) { $('#impFileName').textContent = 'Gagal membaca file'; $('#impErr').textContent = err.message || 'File tidak dapat dibaca.'; }
+}
+function impLoadTable(table) {
+  table = (table || []).filter(r => r && r.some(c => String(c).trim() !== ''));
+  if (table.length < 2) { $('#impErr').textContent = 'Data minimal 2 baris: judul kolom + 1 baris toko.'; IMP.rows = []; return; }
+  // Cari baris judul: baris pertama yang memuat kata "toko"/"nama"/"kota"
+  let h = table.findIndex(r => r.some(c => /toko|nama|kota|customer|pelanggan/i.test(String(c))));
+  if (h < 0 || h > 10) h = 0;
+  IMP.header = table[h].map(c => String(c).trim());
+  IMP.rows = table.slice(h + 1).map((r, i) => ({ cells: r, line: h + i + 2 }));
+  if (IMP.rows.length > 5000) { $('#impErr').textContent = `File berisi ${IMP.rows.length} baris. Maksimal 5.000 per impor.`; IMP.rows = []; return; }
+  IMP.map = autoMap(IMP.header);
+}
+function impStepMap() {
+  const opts = sel => `<option value="">— tidak ada —</option>` + IMP.header.map((h, i) => `<option value="${i}" ${sel === i ? 'selected' : ''}>${esc(h || 'Kolom ' + (i + 1))}</option>`).join('');
+  const sample = i => i === undefined || i === '' ? '' : IMP.rows.slice(0, 3).map(r => r.cells[i]).filter(v => String(v || '').trim()).map(v => esc(String(v).slice(0, 40))).join(' • ');
+  $('#appModalContent .modal-header .text-primary-x').textContent = `Langkah 2 dari 3 • Cocokkan kolom (${IMP.rows.length} baris)`;
+  $('#appModalContent .modal-body').innerHTML = `
+    <p class="small text-2">Kolom sudah dicocokkan otomatis dari judul. Periksa dan ubah bila ada yang keliru.</p>
+    <div class="tbl-wrap mb-3"><table class="tbl"><thead><tr><th>Data Aplikasi</th><th>Kolom di file Anda</th><th>Contoh isi</th></tr></thead><tbody>
+    ${IMP_FIELDS.map(([k, label, req]) => `<tr><td class="fw-semibold">${esc(label)} ${req ? '<span class="text-bad">*</span>' : ''}</td>
+      <td style="min-width:220px"><select class="form-select form-select-sm" data-f="${k}">${opts(IMP.map[k])}</select></td>
+      <td class="cell-sub" id="smp-${k}">${sample(IMP.map[k])}</td></tr>`).join('')}
+    </tbody></table></div>
+    <div class="sum-box"><div class="fw-semibold mb-2">Jika toko sudah ada di aplikasi (ID sama, atau Nama + Kota sama):</div>
+      <div class="choice-grid"><label class="choice"><input type="radio" name="impMode" value="update" checked><div class="t">Perbarui datanya</div><div class="s">Isi baru menimpa yang lama; pin peta & salesman lama dipertahankan bila kolom kosong.</div></label>
+      <label class="choice"><input type="radio" name="impMode" value="skip"><div class="t">Lewati</div><div class="s">Hanya menambahkan toko yang belum ada.</div></label></div></div>
+    <div id="impErr" class="invalid-msg mt-2"></div>`;
+  $$('#appModalContent select[data-f]').forEach(sl => sl.addEventListener('change', () => {
+    IMP.map[sl.dataset.f] = sl.value === '' ? undefined : +sl.value;
+    $('#smp-' + sl.dataset.f).innerHTML = sample(IMP.map[sl.dataset.f]);
+  }));
+  $('#appModalContent .modal-footer').innerHTML = `<button class="btn btn-outline" onclick="openImportToko()"><i class="bi bi-arrow-left"></i> Kembali</button>
+    <button class="btn btn-primary" id="impCheck"><i class="bi bi-search"></i> Periksa Data</button>`;
+  $('#impCheck').onclick = () => impRun(true, $('#impCheck'));
+}
+function impPayload() {
+  return IMP.rows.map(r => {
+    const o = { _line: r.line };
+    IMP_FIELDS.forEach(([k]) => { if (IMP.map[k] !== undefined) o[k] = r.cells[IMP.map[k]] === undefined ? '' : String(r.cells[IMP.map[k]]); });
+    return o;
+  });
+}
+async function impRun(dry, btn) {
+  if (dry) {
+    if (IMP.map.nama === undefined || IMP.map.kota === undefined) return ($('#impErr').textContent = 'Kolom "Nama Toko" dan "Kota / Daerah" wajib dipilih.');
+    IMP.mode = ($('input[name="impMode"]:checked') || {}).value || 'update';
+  }
+  const done = busy(btn, dry ? 'Memeriksa…' : 'Mengimpor…');
+  try {
+    const r = await api('importToko', impPayload(), { dryRun: dry, mode: IMP.mode });
+    if (dry) { IMP.result = r; impStepPreview(r); }
+    else {
+      S.toko = r.toko; reindex(); closeModal(); renderPage(false); saveBootCache();
+      toast(`${r.added} toko baru, ${r.updated} diperbarui${r.errorCount ? `, ${r.errorCount} baris dilewati karena error` : ''}.`, 'ok', 'Impor selesai');
+    }
+  } catch (e) { done(); if ($('#impErr')) $('#impErr').textContent = e.message; }
+}
+function impStepPreview(r) {
+  const sub = $('#appModalContent .modal-header .text-primary-x'); if (sub) sub.textContent = 'Langkah 3 dari 3 • Pratinjau hasil pemeriksaan';
+  const total = r.added + r.updated;
+  const list = (arr, cls) => arr.map(x => `<div class="small py-1 border-bottom" style="border-color:var(--border)!important"><b>Baris ${x.line}:</b> <span class="${cls}">${esc(x.msg)}</span></div>`).join('');
+  $('#appModalContent .modal-body').innerHTML = `
+    <div class="row g-2 mb-3">
+      <div class="col-6 col-md-3"><div class="sum-box"><div class="kpi-label">Toko baru</div><div class="fs-4 fw-bold text-ok num">${r.added}</div></div></div>
+      <div class="col-6 col-md-3"><div class="sum-box"><div class="kpi-label">Diperbarui</div><div class="fs-4 fw-bold text-primary-x num">${r.updated}</div></div></div>
+      <div class="col-6 col-md-3"><div class="sum-box"><div class="kpi-label">Dilewati (sudah ada)</div><div class="fs-4 fw-bold num">${r.skipped}</div></div></div>
+      <div class="col-6 col-md-3"><div class="sum-box"><div class="kpi-label">Baris error</div><div class="fs-4 fw-bold num ${r.errorCount ? 'text-bad' : ''}">${r.errorCount}</div></div></div>
+    </div>
+    ${r.errorCount ? `<div class="danger-zone mb-3"><div class="fw-semibold mb-1"><i class="bi bi-x-octagon"></i> ${r.errorCount} baris tidak akan diimpor</div>
+      <div style="max-height:160px;overflow:auto">${list(r.errors, '')}</div><div class="small mt-2">Perbaiki di file lalu impor ulang. Baris yang valid tetap bisa diimpor sekarang.</div></div>` : ''}
+    ${r.warningCount ? `<details class="mb-3"><summary class="small fw-semibold" style="color:var(--warn-text)"><i class="bi bi-exclamation-triangle"></i> ${r.warningCount} catatan (tetap diimpor)</summary>
+      <div style="max-height:160px;overflow:auto">${list(r.warnings, 'text-2')}</div></details>` : ''}
+    ${r.preview.length ? `<div class="kpi-label mb-2">Contoh data yang akan disimpan</div><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Baris</th><th>Aksi</th><th>Toko</th><th>Kota / Provinsi</th><th>TOP</th><th>Kontak</th><th>Salesman PJ</th><th>Pin Peta</th></tr></thead><tbody>
+      ${r.preview.map(p => `<tr><td class="num">${p.line}</td><td>${pill(p.aksi, p.aksi === 'Baru' ? 'ok' : 'pri')}</td><td class="cell-main">${esc(p.nama)} ${p.id ? `<span class="code">${esc(p.id)}</span>` : ''}</td>
+        <td>${esc(p.kota)}<div class="cell-sub">${esc(p.provinsi)}</div></td><td>${pill(topLabel(p.top), p.top === 'Tunai' ? 'ok' : 'pri')}</td><td class="num">${esc(p.kontak)}</td>
+        <td>${esc(p.idSalesman ? salesOf(p.idSalesman).nama : '-')}</td><td>${p.lat !== '' ? pill('Ada', 'ok', 1) : pill('Belum', 'warn')}</td></tr>`).join('')}
+      </tbody></table></div>` : ''}
+    <div id="impErr" class="invalid-msg mt-2"></div>`;
+  $('#appModalContent .modal-footer').innerHTML = `<button class="btn btn-outline" onclick="impStepMap()"><i class="bi bi-arrow-left"></i> Ubah Kolom</button>
+    <button class="btn btn-primary" id="impGo" ${total ? '' : 'disabled'}><i class="bi bi-cloud-upload"></i> Impor ${total} Toko</button>`;
+  $('#impGo').onclick = () => impRun(false, $('#impGo'));
+}
+async function clearServerCache(btn) {
+  const done = busy(btn, 'Menyegarkan…');
+  try { await api('clearServerCache'); await syncNow(true); toast('Cache server dikosongkan & data terbaru dimuat.', 'ok'); }
+  catch (e) { e.type !== 'auth' && toast(e.message, 'bad'); } finally { done(); }
 }
