@@ -63,11 +63,22 @@
     <div class="login-main">
       <div class="login-card">
         <div class="brand-logo mb-3 d-lg-none">KNS</div>
-        <h2 class="h4 fw-semibold mb-1">Masuk ke Sales Performance</h2>
-        <p class="text-2 mb-4">Gunakan akun Google yang sudah didaftarkan oleh Manajer Penjualan.</p>
-        <div id="gsiBtn" class="gsi-wrap"><div class="skel" style="height:44px;width:280px"></div></div>
+        <div id="loginStep">
+          <h2 class="h4 fw-semibold mb-1">Masuk ke Sales Performance</h2>
+          <p class="text-2 mb-4">Gunakan email & kata sandi yang diberikan Manajer Penjualan.</p>
+          <form id="loginForm" novalidate>
+            <label class="form-label" for="lgEmail">Email</label>
+            <input type="email" class="form-control mb-3" id="lgEmail" autocomplete="username" inputmode="email" placeholder="nama@email.com" required>
+            <label class="form-label" for="lgPass">Kata sandi</label>
+            <div class="pw-wrap"><input type="password" class="form-control" id="lgPass" autocomplete="current-password" required>
+              <button type="button" class="pw-eye" onclick="togglePw(this)" aria-label="Tampilkan kata sandi"><i class="bi bi-eye"></i></button></div>
+            <button type="submit" class="btn btn-primary w-100 mt-3" id="lgBtn"><i class="bi bi-box-arrow-in-right"></i> Masuk</button>
+          </form>
+          <div class="text-center small text-2 mt-3" id="lgForgot">Lupa kata sandi? Minta Manajer Penjualan me-reset dari menu Data Salesman.</div>
+          <div id="gsiArea" class="d-none"><div class="or-sep"><span>atau</span></div><div id="gsiBtn" class="gsi-wrap"></div></div>
+        </div>
         <div id="loginMsg" class="login-msg" role="alert"></div>
-        <div class="callout mt-4"><i class="bi bi-shield-lock"></i><div class="small">Login diverifikasi langsung oleh Google. Aplikasi tidak pernah menerima kata sandi Anda.</div></div>
+        <div class="callout mt-4"><i class="bi bi-shield-lock"></i><div class="small">Kata sandi disimpan terenkripsi (hash) dan akun terkunci sementara setelah 5 kali salah.</div></div>
       </div>
     </div>
   </div>
@@ -93,7 +104,8 @@
             <div class="me-name" id="meName">-</div>
             <div class="me-role" id="meRole">-</div>
           </div>
-          <button class="logout-btn" onclick="logout()" title="Keluar" aria-label="Keluar"><i class="bi bi-box-arrow-right"></i></button>
+          <button class="logout-btn ms-auto" onclick="openChangePassword()" title="Ubah kata sandi" aria-label="Ubah kata sandi"><i class="bi bi-key"></i></button>
+          <button class="logout-btn" style="margin-left:6px" onclick="logout()" title="Keluar" aria-label="Keluar"><i class="bi bi-box-arrow-right"></i></button>
         </div>
       </div>
     </aside>

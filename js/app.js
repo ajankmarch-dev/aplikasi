@@ -4,7 +4,7 @@
    Di-host di GitHub Pages; backend = Google Apps Script REST API.
    ------------------------------------------------------------
    • Komunikasi: fetch POST text/plain → tanpa CORS preflight
-   • Login: Sign in with Google → token sesi (localStorage)
+   • Login: email + kata sandi (atau Google, opsional) → token sesi
    • SPA: semua halaman ada di DOM, navigasi = tampil/sembunyi (0 ms)
    • Buka ulang instan: data terakhir di-cache di perangkat lalu
      diperbarui di latar belakang (stale-while-revalidate)
@@ -129,7 +129,7 @@ async function api(fn, ...args) {
   catch (e) { throw { type: 'network', message: `Respons server tidak valid (HTTP ${res.status}). Pastikan Web App di-deploy dengan akses "Anyone".` }; }
   if (out && out.success) return out.data;
   const msg = String((out && out.message) || 'Terjadi kesalahan.');
-  if (/^AUTH:/.test(msg)) { if (fn !== 'login') onAuthLost(msg); throw { type: 'auth', message: msg.replace(/^AUTH:\s*/, '') }; }
+  if (/^AUTH:/.test(msg)) { if (fn !== 'login' && fn !== 'loginPassword') onAuthLost(msg); throw { type: 'auth', message: msg.replace(/^AUTH:\s*/, '') }; }
   throw { type: 'server', message: msg.replace(/^SETUP:\s*/, '') };
 }
 
@@ -310,44 +310,180 @@ function startApp(d) {
   window.addEventListener('beforeunload', e => { saveBootCache(); if (S.outbox.length && !S.obPersisted) { e.preventDefault(); e.returnValue = ''; } });
 }
 
-// ── Login dengan Google ──
+// ── Login: email + kata sandi (utama) & Google (opsional) ──
 let _gsiReady = false;
+const googleEnabled = () => !!CFG.GOOGLE_CLIENT_ID && !/XXXX/.test(CFG.GOOGLE_CLIENT_ID);
+function togglePw(btn) {
+  const inp = btn.parentNode.querySelector('input');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+  btn.innerHTML = `<i class="bi ${inp.type === 'password' ? 'bi-eye' : 'bi-eye-slash'}"></i>`;
+}
 function showLogin(msg, info) {
   hideSplash();
   $('#login').classList.remove('d-none');
   const m = $('#loginMsg'); m.textContent = msg || ''; m.className = 'login-msg' + (info ? ' info' : '');
-  if (!CFG.GOOGLE_CLIENT_ID || /XXXX/.test(CFG.GOOGLE_CLIENT_ID)) {
-    $('#gsiBtn').innerHTML = '';
-    m.className = 'login-msg'; m.textContent = 'GOOGLE_CLIENT_ID belum diisi di js/config.js. Hubungi admin aplikasi.';
-    return;
-  }
+  const last = (() => { try { return localStorage.getItem('kns_last_email') || ''; } catch (e) { return ''; } })();
+  if (!$('#lgEmail').value) $('#lgEmail').value = AUTH.email || last;
+  $('#lgPass').value = '';
+  setTimeout(() => ($('#lgEmail').value ? $('#lgPass') : $('#lgEmail')).focus(), 50);
+  $('#loginForm').onsubmit = submitLogin;
+  if (!googleEnabled()) return;
+  $('#gsiArea').classList.remove('d-none');
   loadScript('https://accounts.google.com/gsi/client').then(() => {
     if (!_gsiReady) {
-      google.accounts.id.initialize({ client_id: CFG.GOOGLE_CLIENT_ID, callback: onGoogleCredential, auto_select: true,
-        cancel_on_tap_outside: false, use_fedcm_for_prompt: true });
+      google.accounts.id.initialize({ client_id: CFG.GOOGLE_CLIENT_ID, callback: onGoogleCredential, auto_select: false, cancel_on_tap_outside: true });
       _gsiReady = true;
     }
     $('#gsiBtn').innerHTML = '';
-    google.accounts.id.renderButton($('#gsiBtn'), { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'signin_with',
+    google.accounts.id.renderButton($('#gsiBtn'), { theme: 'outline', size: 'large', shape: 'pill', text: 'signin_with',
       locale: 'id', width: Math.min(320, $('#gsiBtn').clientWidth || 320) });
-    google.accounts.id.prompt();
-  }).catch(() => { $('#gsiBtn').innerHTML = ''; m.className = 'login-msg'; m.textContent = 'Layanan login Google tidak dapat dimuat. Periksa koneksi internet lalu muat ulang.'; });
+  }).catch(() => { $('#gsiArea').classList.add('d-none'); });
+}
+async function submitLogin(ev) {
+  ev.preventDefault();
+  const email = $('#lgEmail').value.trim().toLowerCase(), pw = $('#lgPass').value;
+  const m = $('#loginMsg');
+  $('#lgEmail').classList.toggle('is-invalid', !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
+  $('#lgPass').classList.toggle('is-invalid', !pw);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !pw) { m.className = 'login-msg'; m.textContent = 'Isi email dan kata sandi dengan benar.'; return; }
+  const done = busy($('#lgBtn'), 'Memeriksa…');
+  m.textContent = '';
+  try {
+    const r = await api('loginPassword', email, pw);
+    try { localStorage.setItem('kns_last_email', email); } catch (e) { /* abaikan */ }
+    done();
+    if (r.mustChange) return showSetPassword(r, pw);
+    finishLogin(r);
+  } catch (e) {
+    done(); m.className = 'login-msg'; m.textContent = e.message; $('#lgPass').select();
+  }
 }
 async function onGoogleCredential(resp) {
   const m = $('#loginMsg');
   m.className = 'login-msg info'; m.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Memverifikasi akun…';
-  try {
-    const r = await api('login', resp.credential);
-    const prevEmail = AUTH.email;
-    AUTH.token = r.token; AUTH.email = r.boot.user.email;
-    saveAuth({ token: r.token, email: r.boot.user.email });
-    if (S.started && prevEmail && prevEmail !== AUTH.email) return location.reload();   // ganti akun → mulai bersih
-    startApp(r.boot); saveBootCache();
-    toast(`Selamat datang, ${r.boot.user.nama}.`, 'ok');
-  } catch (e) {
-    m.className = 'login-msg'; m.textContent = e.message;
-  }
+  try { finishLogin(await api('login', resp.credential)); }
+  catch (e) { m.className = 'login-msg'; m.textContent = e.message; }
 }
+function finishLogin(r) {
+  const prevEmail = AUTH.email;
+  AUTH.token = r.token; AUTH.email = r.boot.user.email;
+  saveAuth({ token: r.token, email: r.boot.user.email });
+  if (S.started && prevEmail && prevEmail !== AUTH.email) return location.reload();   // ganti akun → mulai bersih
+  restoreLoginStep();
+  startApp(r.boot); saveBootCache();
+  toast(`Selamat datang, ${r.boot.user.nama}.`, 'ok');
+}
+function restoreLoginStep() { const st = $('#loginStep'); if (st && st.dataset.orig) { st.innerHTML = st.dataset.orig; delete st.dataset.orig; } }
+
+/** Indikator kekuatan kata sandi sederhana. */
+function pwScore(pw) {
+  let sc = 0;
+  if (pw.length >= 8) sc++; if (pw.length >= 12) sc++;
+  if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) sc++; if (/\d/.test(pw)) sc++; if (/[^A-Za-z0-9]/.test(pw)) sc++;
+  return sc;
+}
+function pwFields(prefix) {
+  return `<label class="form-label" for="${prefix}New">Kata sandi baru</label>
+    <div class="pw-wrap"><input type="password" class="form-control" id="${prefix}New" autocomplete="new-password" minlength="8" required>
+      <button type="button" class="pw-eye" onclick="togglePw(this)" aria-label="Tampilkan kata sandi"><i class="bi bi-eye"></i></button></div>
+    <div class="pw-meter"><span id="${prefix}Meter"></span></div>
+    <div class="form-text mb-3">Minimal 8 karakter, berisi huruf dan angka.</div>
+    <label class="form-label" for="${prefix}Conf">Ulangi kata sandi baru</label>
+    <input type="password" class="form-control" id="${prefix}Conf" autocomplete="new-password" required>`;
+}
+function bindPwMeter(prefix) {
+  $('#' + prefix + 'New').addEventListener('input', e => {
+    const sc = pwScore(e.target.value), m = $('#' + prefix + 'Meter');
+    m.style.width = (sc / 5 * 100) + '%';
+    m.style.backgroundColor = sc <= 2 ? 'var(--bad)' : sc === 3 ? 'var(--warn)' : 'var(--ok)';
+  });
+}
+function validateNewPw(prefix, oldPw) {
+  const a = $('#' + prefix + 'New').value, b = $('#' + prefix + 'Conf').value;
+  if (a.length < 8) return 'Kata sandi minimal 8 karakter.';
+  if (!/[A-Za-z]/.test(a) || !/\d/.test(a)) return 'Kata sandi harus berisi huruf dan angka.';
+  if (a !== b) return 'Ulangan kata sandi tidak sama.';
+  if (oldPw && a === oldPw) return 'Kata sandi baru harus berbeda dari kata sandi sementara.';
+  return '';
+}
+/** Login pertama dengan sandi sementara → wajib membuat sandi sendiri sebelum masuk. */
+function showSetPassword(r, tempPw) {
+  const st = $('#loginStep');
+  if (!st.dataset.orig) st.dataset.orig = st.innerHTML;
+  AUTH.token = r.token; AUTH.email = r.boot.user.email;           // sementara di memori saja
+  st.innerHTML = `<h2 class="h4 fw-semibold mb-1">Buat kata sandi baru</h2>
+    <p class="text-2 mb-4">Halo <b>${esc(r.boot.user.nama)}</b>, Anda masuk dengan kata sandi sementara. Buat kata sandi pribadi untuk melanjutkan.</p>
+    <form id="setPwForm" novalidate>${pwFields('sp')}
+      <button type="submit" class="btn btn-primary w-100 mt-3" id="spBtn"><i class="bi bi-check2-circle"></i> Simpan & Masuk</button></form>
+    <button class="btn btn-ghost w-100 mt-2" onclick="restoreLoginStep();AUTH.token=null;showLogin()">Batal</button>`;
+  bindPwMeter('sp');
+  $('#spNew').focus();
+  $('#setPwForm').onsubmit = async ev => {
+    ev.preventDefault();
+    const err = validateNewPw('sp', tempPw), m = $('#loginMsg');
+    m.className = 'login-msg'; m.textContent = err;
+    if (err) return;
+    const done = busy($('#spBtn'));
+    try {
+      const x = await api('changePassword', tempPw, $('#spNew').value);
+      r.token = x.token; finishLogin(r);
+      toast('Kata sandi baru tersimpan. Gunakan untuk login berikutnya.', 'ok');
+    } catch (e) { done(); m.textContent = e.message; }
+  };
+}
+/** Ubah kata sandi dari dalam aplikasi. */
+function openChangePassword() {
+  closeDrawer();
+  const hasPw = S.user && S.user.hasPassword !== false;
+  openModal({
+    title: 'Ubah Kata Sandi', sub: esc(S.user.email), size: '', fs: false,
+    body: `<form id="cpForm" novalidate>
+      ${hasPw ? `<label class="form-label" for="cpOld">Kata sandi saat ini</label>
+      <div class="pw-wrap mb-3"><input type="password" class="form-control" id="cpOld" autocomplete="current-password" required>
+        <button type="button" class="pw-eye" onclick="togglePw(this)" aria-label="Tampilkan kata sandi"><i class="bi bi-eye"></i></button></div>` : ''}
+      ${pwFields('cp')}<div id="cpErr" class="invalid-msg mt-2"></div></form>
+      <div class="form-text mt-3">Setelah diganti, perangkat lain yang masih login akan diminta login ulang.</div>`,
+    footer: `<button class="btn btn-outline" data-bs-dismiss="modal">Batal</button><button class="btn btn-primary" id="cpSave"><i class="bi bi-check2-circle"></i> Simpan</button>`
+  });
+  bindPwMeter('cp');
+  $('#cpSave').onclick = async () => {
+    const old = hasPw ? $('#cpOld').value : '';
+    const err = (hasPw && !old) ? 'Isi kata sandi saat ini.' : validateNewPw('cp');
+    $('#cpErr').textContent = err; if (err) return;
+    const done = busy($('#cpSave'));
+    try {
+      const x = await api('changePassword', old, $('#cpNew').value);
+      AUTH.token = x.token; saveAuth({ token: x.token, email: AUTH.email }); S.user.hasPassword = true;
+      closeModal(); toast('Kata sandi berhasil diubah.', 'ok');
+    } catch (e) { done(); $('#cpErr').textContent = e.message; }
+  };
+}
+/** Tampilkan kredensial login untuk diteruskan ke pengguna (sekali tampil). */
+function showCredentials(email, pw, nama) {
+  const url = (S.settings.frontendUrl || location.origin + location.pathname);
+  const text = `Login Sales Performance KNS Teknik\nAlamat: ${url}\nEmail: ${email}\nKata sandi sementara: ${pw}\n(Wajib diganti saat login pertama)`;
+  openModal({
+    title: 'Kata Sandi Sementara', sub: esc(nama || email), size: '', fs: false,
+    body: `<p class="small text-2">Berikan data ini ke pengguna. Kata sandi hanya ditampilkan <b>sekali</b> dan wajib diganti saat login pertama.</p>
+      <div class="cred-box mb-3"><div class="small text-2">Email</div><div class="fw-semibold mb-2">${esc(email)}</div>
+        <div class="small text-2">Kata sandi sementara</div><div class="pw num">${esc(pw)}</div></div>
+      <div class="small text-2">Alamat aplikasi: <span class="text-primary-x">${esc(url)}</span></div>`,
+    footer: `<button class="btn btn-outline" id="credCopy"><i class="bi bi-clipboard"></i> Salin</button>
+      <a class="btn btn-ok-soft" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(text)}"><i class="bi bi-whatsapp"></i> Kirim via WA</a>
+      <button class="btn btn-primary" data-bs-dismiss="modal">Selesai</button>`
+  });
+  $('#credCopy').onclick = () => navigator.clipboard.writeText(text).then(() => toast('Tersalin.', 'ok')).catch(() => toast('Salin manual: ' + pw, 'info'));
+}
+async function resetUserPassword(email) {
+  const u = S.pengguna.find(x => x.email === email);
+  if (!await confirmBox({ title: 'Reset kata sandi?', msg: `${u.nama} akan mendapat kata sandi sementara baru. Kata sandi lama & semua sesi loginnya langsung tidak berlaku.`, ok: 'Reset', icon: 'bi-key' })) return;
+  try {
+    const r = await api('resetPassword', email);
+    u.punyaSandi = true; renderPage(false);
+    showCredentials(r.email, r.tempPassword, u.nama);
+  } catch (e) { e.type !== 'auth' && toast(e.message, 'bad', 'Gagal reset'); }
+}
+
 /** Sesi kedaluwarsa/dicabut: minta login ulang tanpa membuang data tertunda. */
 function onAuthLost(msg) {
   AUTH.token = null;
@@ -1885,8 +2021,8 @@ PAGES.salesman = (el) => {
   const salesUsers = users.filter(u => u.peran === R.SLS && u.status !== 'Nonaktif');
   const portfolio = id => S.toko.filter(t => t.idSalesman === id && t.status !== 'Nonaktif').length;
   const covered = salesUsers.filter(u => (salesOf(u.idSalesman).wilayah || '').trim()).length;
-  el.innerHTML = `<div class="callout mb-4"><i class="bi bi-shield-lock"></i><div class="flex-grow-1"><b>Akses Manajer Terproteksi</b> ${pill('Sign in with Google', 'pri')}<br>
-      Hanya akun di daftar ini yang dapat membuka aplikasi. ${S.settings.allowedDomain ? `Login dibatasi untuk akun <b>@${esc(S.settings.allowedDomain)}</b>.` : 'Akun Google apa pun yang terdaftar di sini dapat login.'}</div></div>` +
+  el.innerHTML = `<div class="callout mb-4"><i class="bi bi-shield-lock"></i><div class="flex-grow-1"><b>Akses Manajer Terproteksi</b> ${pill('Email + kata sandi', 'pri')}<br>
+      Hanya akun di daftar ini yang dapat membuka aplikasi. Email boleh dari layanan apa pun. Pengguna baru otomatis mendapat kata sandi sementara; lupa sandi → klik <b>Reset Sandi</b>. ${S.settings.allowedDomain ? `Login dibatasi untuk email <b>@${esc(S.settings.allowedDomain)}</b>.` : ''}</div></div>` +
     pageHead('Administrasi sales', 'Manajemen Tim Salesman & Hak Akses', '',
       `<button class="btn btn-primary" onclick="openUserForm()"><i class="bi bi-person-plus"></i> Tambah Pengguna Baru</button>`) + `
   <div class="row g-3 mb-4">
@@ -1894,20 +2030,22 @@ PAGES.salesman = (el) => {
       meta: `${users.filter(u => u.peran === R.SLS && u.status !== 'Nonaktif').length} Salesman, ${users.filter(u => u.peran === R.ADM && u.status !== 'Nonaktif').length} Admin, ${users.filter(u => u.peran === R.MGR).length} Manajer` })}</div>
     <div class="col-6 col-xl-3">${kpi({ label: 'Total Toko Terkelola', value: `${S.toko.filter(t => t.status !== 'Nonaktif').length} <small>toko</small>`, icon: 'bi-shop',
       meta: `Rata-rata ${salesUsers.length ? (S.toko.filter(t => t.status !== 'Nonaktif').length / salesUsers.length).toFixed(1).replace('.', ',') : 0} toko per salesman` })}</div>
-    <div class="col-6 col-xl-3">${kpi({ label: 'Login', value: 'Google', icon: 'bi-google', meta: S.settings.allowedDomain ? `Dibatasi: @${esc(S.settings.allowedDomain)}` : 'Semua akun Google terdaftar' })}</div>
+    <div class="col-6 col-xl-3">${kpi({ label: 'Kata Sandi Diatur', value: `${users.filter(u => u.punyaSandi).length}/${users.length}`, icon: 'bi-key', meta: S.settings.allowedDomain ? `Dibatasi: @${esc(S.settings.allowedDomain)}` : 'Email dari layanan apa pun' })}</div>
     <div class="col-6 col-xl-3">${kpi({ label: 'Status Penugasan', value: `${pct(covered, salesUsers.length)}% <small>tercover</small>`, icon: 'bi-map', bar: pct(covered, salesUsers.length), barCls: 'ok', meta: `${covered}/${salesUsers.length} salesman memiliki wilayah` })}</div>
   </div>
   <div class="card-x"><div class="card-head mb-3"><div><h2 class="card-title">Direktori Akses & Penugasan Wilayah</h2><p class="card-sub">Staf yang memiliki kredensial resmi pada sistem Sales Performance</p></div></div>
-  <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Pengguna</th><th>Peran Akses</th><th>Cakupan Wilayah</th><th class="n">Portofolio Toko</th><th class="n">Target Omset</th><th>Status</th><th class="text-end">Tindakan</th></tr></thead><tbody>
+  <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Pengguna</th><th>Peran Akses</th><th>Cakupan Wilayah</th><th class="n">Portofolio Toko</th><th class="n">Target Omset</th><th>Kata Sandi</th><th>Status</th><th class="text-end">Tindakan</th></tr></thead><tbody>
   ${users.map(u => { const s = salesOf(u.idSalesman), me = String(u.email).toLowerCase() === S.user.email;
     return `<tr><td><div class="d-flex align-items-center gap-2"><div class="avatar">${esc(initials(u.nama))}</div><div><div class="cell-main">${esc(u.nama)} ${me ? pill('Anda', 'pri') : ''}</div><div class="cell-sub">${esc(u.email)}</div></div></div></td>
       <td>${u.peran === R.MGR ? `<span class="pill" style="background:var(--rail);color:#fff"><i class="bi bi-shield-fill"></i>Manajer</span>` : u.peran === R.ADM ? pill('Admin Ops', 'neu') : pill('Salesman', 'pri')}</td>
       <td>${u.peran === R.SLS ? `<i class="bi bi-globe2 text-2"></i> ${esc(s.wilayah || '-')}` : u.peran === R.MGR ? 'Seluruh Indonesia' : 'Kantor Pusat'}</td>
       <td class="n num">${u.peran === R.SLS ? `${portfolio(u.idSalesman)} toko` : u.peran === R.MGR ? `${S.toko.length} (supervisi)` : 'Toko & Piutang'}</td>
       <td class="n num">${u.peran === R.SLS ? rpShort(targetOf(s)) : '-'}</td>
+      <td>${u.punyaSandi ? pill('Sudah diatur', 'ok') : pill('Belum ada', 'warn')}</td>
       <td>${u.status === 'Nonaktif' ? pill('Nonaktif', 'neu') : pill('Aktif', 'ok', 1)}</td>
       <td class="text-end text-nowrap">${me ? `<span class="small text-2"><i class="bi bi-lock"></i> Profil terproteksi</span>` : `
         <button class="btn btn-sm btn-outline" onclick="openUserForm('${esc(u.email)}')">Edit</button>
+        <button class="btn btn-sm btn-outline" onclick="resetUserPassword('${esc(u.email)}')" title="Buat kata sandi sementara"><i class="bi bi-key"></i> Reset Sandi</button>
         <button class="btn btn-sm ${u.status === 'Nonaktif' ? 'btn-ok-soft' : 'btn-danger-soft'}" onclick="toggleUser('${esc(u.email)}')">${u.status === 'Nonaktif' ? 'Aktifkan' : 'Nonaktifkan'}</button>`}</td></tr>`; }).join('')}
   </tbody></table></div></div>`;
 };
@@ -1921,6 +2059,9 @@ function openUserForm(email) {
       <div class="col-md-6"><label class="form-label">Email Google <span class="req">*</span></label><input type="email" class="form-control" name="email" value="${esc(u.email)}" placeholder="nama@${esc(S.settings.domain || 'perusahaan.com')}" required></div>
       <div class="col-md-6"><label class="form-label">Peran Akses</label><select class="form-select" name="peran">${selectOptions([R.SLS, R.ADM, R.MGR], u.peran)}</select></div>
       <div class="col-md-6"><label class="form-label">Status</label><select class="form-select" name="status">${selectOptions(['Aktif', 'Nonaktif'], u.status)}</select></div>
+      ${email ? '' : `<div class="col-12"><label class="form-label">Kata sandi awal <span class="text-2 fw-normal">(opsional)</span></label>
+        <input class="form-control" name="password" autocomplete="off" placeholder="Kosongkan agar dibuat otomatis">
+        <div class="form-text">Pengguna wajib menggantinya saat login pertama. Email boleh dari layanan apa pun (Gmail, Yahoo, Outlook, email kantor).</div></div>`}
       <div class="col-12 sales-only"><label class="form-label">Wilayah Tugas</label><input class="form-control" name="wilayah" value="${esc(s.wilayah)}" placeholder="Contoh: Jawa Barat & DKI Jakarta"></div>
       <div class="col-md-6 sales-only"><label class="form-label">Target Omset Bulanan</label><div class="input-rp"><span>Rp</span><input class="form-control num" name="targetOmset" inputmode="numeric" value="${s.targetOmset ? NF.format(s.targetOmset) : ''}"></div></div>
       <div class="col-md-6 sales-only"><label class="form-label">Target Kunjungan Bulanan</label><input type="number" min="0" class="form-control" name="targetKunjungan" value="${esc(s.targetKunjungan)}"></div>
@@ -1937,6 +2078,7 @@ async function saveUser(d, btn) {
   const err = [];
   if (!String(d.nama || '').trim()) err.push('Nama wajib diisi.');
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(d.email || '').trim())) err.push('Email tidak valid.');
+  if (d.password && (d.password.length < 8 || !/[A-Za-z]/.test(d.password) || !/\d/.test(d.password))) err.push('Kata sandi awal minimal 8 karakter berisi huruf & angka.');
   if ($('#usErr')) $('#usErr').innerHTML = err.map(e => `<div>${esc(e)}</div>`).join('');
   if (err.length) return;
   const done = busy(btn);
@@ -1944,6 +2086,7 @@ async function saveUser(d, btn) {
     const r = await api('saveSalesman', d);
     S.pengguna = r.pengguna; S.salesman = r.salesman; reindex();
     closeModal(); renderPage(false); toast(`${d.nama} tersimpan.`, 'ok', 'Data pengguna diperbarui');
+    if (r.tempPassword) setTimeout(() => showCredentials(r.email, r.tempPassword, d.nama), 400);
   } catch (e) { done(); if ($('#usErr')) $('#usErr').textContent = e.message; e.type !== 'auth' && toast(e.message, 'bad', 'Gagal menyimpan'); }
 }
 async function toggleUser(email) {
@@ -1975,7 +2118,7 @@ PAGES.notifikasi = (el, params, fresh) => {
         <div class="form-text mb-3">Dipakai untuk tombol "Buka Aplikasi" di email notifikasi.</div>
         <label class="form-label">Batasi login ke domain (opsional)</label>
         <div class="input-group mb-1"><span class="input-group-text">@</span><input class="form-control" name="allowedDomain" value="${esc(st.allowedDomain || '')}" placeholder="knsteknik.com"></div>
-        <div class="form-text mb-2">Kosongkan agar akun Gmail terdaftar juga bisa login.</div>
+        <div class="form-text mb-2">Kosongkan agar email dari layanan apa pun (Gmail, Yahoo, dll.) yang terdaftar bisa login.</div>
         <div class="form-check mb-3"><input class="form-check-input" type="checkbox" name="revokeAll" id="stRevoke"><label class="form-check-label small" for="stRevoke">Paksa semua pengguna login ulang (cabut sesi)</label></div>
         <hr style="border-color:var(--border)">
         <h3 class="h6 fw-semibold mb-3">Target & Validasi</h3>

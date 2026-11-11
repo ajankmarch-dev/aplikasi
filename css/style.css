@@ -491,7 +491,7 @@ h1, h2, h3, .page-title, .card-title { color: var(--text); }
 .login-msg { margin-top: 14px; font-size: 13px; color: var(--bad-text); }
 .login-msg.info { color: var(--text-2); }
 .login-msg:empty { display: none; }
-.logout-btn { margin-left: auto; width: 36px; height: 36px; border-radius: var(--r-sm); border: 0; background: rgba(255,255,255,.08);
+.logout-btn { width: 36px; height: 36px; border-radius: var(--r-sm); border: 0; background: rgba(255,255,255,.08);
   color: #E0E7FF; display: grid; place-items: center; flex-shrink: 0; }
 .logout-btn:hover { background: rgba(255,255,255,.16); color: #fff; }
 @media (max-width: 991.98px) {
@@ -503,3 +503,17 @@ h1, h2, h3, .page-title, .card-title { color: var(--text); }
 @media (min-width: 768px) and (max-width: 1279.98px) { .logout-btn { display: none; } }
 
 .login-card h2, .gate-card h1 { color: var(--text); }
+
+/* ── Login email + kata sandi ── */
+.pw-wrap { position: relative; }
+.pw-wrap .form-control { padding-right: 48px; }
+.pw-eye { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 40px; height: 40px; border: 0; background: transparent;
+  color: var(--text-2); border-radius: var(--r-sm); display: grid; place-items: center; }
+.pw-eye:hover { background: var(--surface-3); color: var(--text); }
+.or-sep { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; margin: 20px 0 14px; }
+.or-sep::before, .or-sep::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.pw-meter { height: 6px; border-radius: 999px; background: var(--surface-3); overflow: hidden; margin-top: 8px; }
+.pw-meter span { display: block; height: 100%; width: 0; transition: width .2s ease, background-color .2s ease; }
+.cred-box { background: var(--surface-3); border: 1px dashed var(--border-strong); border-radius: var(--r-md); padding: 14px 16px; font-size: 14px; }
+.cred-box .pw { font-size: 22px; font-weight: 700; letter-spacing: .06em; color: var(--primary-text); }
+.side-foot .logout-btn.ms-auto { margin-left: auto; }
